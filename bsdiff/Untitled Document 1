@@ -1,0 +1,144 @@
+bsdiff main()-
+int main(int argc,char *argv[])
+{
+	int fd;
+	int bz2err;
+	uint8_t *old,*new;
+	off_t oldsize,newsize;
+	uint8_t buf[8];
+	FILE * pf;
+	struct bsdiff_stream stream;
+	BZFILE* bz2;
+
+	memset(&bz2, 0, sizeof(bz2));
+	stream.malloc = malloc;
+	stream.free = free;
+	stream.write = bz2_write;
+
+	if(argc!=4) errx(1,"usage: %s oldfile newfile patchfile\n",argv[0]);
+
+	/* Allocate oldsize+1 bytes instead of oldsize bytes to ensure
+		that we never try to malloc(0) and get a NULL pointer */
+	if(((fd=open(argv[1],O_RDONLY,0))<0) ||
+		((oldsize=lseek(fd,0,SEEK_END))==-1) ||
+		((old=malloc(oldsize+1))==NULL) ||
+		(lseek(fd,0,SEEK_SET)!=0) ||
+		(read(fd,old,oldsize)!=oldsize) ||
+		(close(fd)==-1)) err(1,"%s",argv[1]);
+
+
+	/* Allocate newsize+1 bytes instead of newsize bytes to ensure
+		that we never try to malloc(0) and get a NULL pointer */
+	if(((fd=open(argv[2],O_RDONLY,0))<0) ||
+		((newsize=lseek(fd,0,SEEK_END))==-1) ||
+		((new=malloc(newsize+1))==NULL) ||
+		(lseek(fd,0,SEEK_SET)!=0) ||
+		(read(fd,new,newsize)!=newsize) ||
+		(close(fd)==-1)) err(1,"%s",argv[2]);
+
+	/* Create the patch file */
+	if ((pf = fopen(argv[3], "w")) == NULL)
+		err(1, "%s", argv[3]);
+
+	/* Write header (signature+newsize)*/
+	offtout(newsize, buf);
+	if (fwrite("ENDSLEY/BSDIFF43", 16, 1, pf) != 1 ||
+		fwrite(buf, sizeof(buf), 1, pf) != 1)
+		err(1, "Failed to write header");
+
+
+	if (NULL == (bz2 = BZ2_bzWriteOpen(&bz2err, pf, 9, 0, 0)))
+		errx(1, "BZ2_bzWriteOpen, bz2err=%d", bz2err);
+
+	stream.opaque = bz2;
+	if (bsdiff(old, oldsize, new, newsize, &stream))
+		err(1, "bsdiff");
+
+	BZ2_bzWriteClose(&bz2err, bz2, 0, NULL, NULL);
+	if (bz2err != BZ_OK)
+		err(1, "BZ2_bzWriteClose, bz2err=%d", bz2err);
+
+	if (fclose(pf))
+		err(1, "fclose");
+
+	/* Free the memory we used */
+	free(old);
+	free(new);
+
+	return 0;
+}
+
+#endif
+
+
+
+
+
+bspatch main()- 
+int main(int argc,char * argv[])
+{
+	FILE * f;
+	int fd;
+	int bz2err;
+	uint8_t header[24];
+	uint8_t *old, *new;
+	int64_t oldsize, newsize;
+	BZFILE* bz2;
+	struct bspatch_stream stream;
+	struct stat sb;
+
+	if(argc!=4) errx(1,"usage: %s oldfile newfile patchfile\n",argv[0]);
+
+	/* Open patch file */
+	if ((f = fopen(argv[3], "r")) == NULL)
+		err(1, "fopen(%s)", argv[3]);
+
+	/* Read header */
+	if (fread(header, 1, 24, f) != 24) {
+		if (feof(f))
+			errx(1, "Corrupt patch\n");
+		err(1, "fread(%s)", argv[3]);
+	}
+
+	/* Check for appropriate magic */
+	if (memcmp(header, "ENDSLEY/BSDIFF43", 16) != 0)
+		errx(1, "Corrupt patch\n");
+
+	/* Read lengths from header */
+	newsize=offtin(header+16);
+	if(newsize<0)
+		errx(1,"Corrupt patch\n");
+
+	/* Close patch file and re-open it via libbzip2 at the right places */
+	if(((fd=open(argv[1],O_RDONLY,0))<0) ||
+		((oldsize=lseek(fd,0,SEEK_END))==-1) ||
+		((old=malloc(oldsize+1))==NULL) ||
+		(lseek(fd,0,SEEK_SET)!=0) ||
+		(read(fd,old,oldsize)!=oldsize) ||
+		(fstat(fd, &sb)) ||
+		(close(fd)==-1)) err(1,"%s",argv[1]);
+	if((new=malloc(newsize+1))==NULL) err(1,NULL);
+
+	if (NULL == (bz2 = BZ2_bzReadOpen(&bz2err, f, 0, 0, NULL, 0)))
+		errx(1, "BZ2_bzReadOpen, bz2err=%d", bz2err);
+
+	stream.read = bz2_read;
+	stream.opaque = bz2;
+	if (bspatch(old, oldsize, new, newsize, &stream))
+		errx(1, "bspatch");
+
+	/* Clean up the bzip2 reads */
+	BZ2_bzReadClose(&bz2err, bz2);
+	fclose(f);
+
+	/* Write the new file */
+	if(((fd=open(argv[2],O_CREAT|O_TRUNC|O_WRONLY,sb.st_mode))<0) ||
+		(write(fd,new,newsize)!=newsize) || (close(fd)==-1))
+		err(1,"%s",argv[2]);
+
+	free(new);
+	free(old);
+
+	return 0;
+}
+
